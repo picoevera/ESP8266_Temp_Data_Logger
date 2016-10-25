@@ -3,6 +3,8 @@
 #include <EEPROM.h>
 #include <ESP8266WebServer.h>
 
+#define ESP8266_CLIENT_ID  0
+
 #define ESP8266_12_GPIO4 4 // Led in NodeMCU at pin GPIO16 (D0).
 #define ESP8266_12_GPIO5 5
 #define ESP8266_12_GPIO12 12
@@ -25,27 +27,35 @@
 DHT dht(DHTPIN, DHTTYPE, 15);
 
 // SM states
-#define NUM_STATES  8
+#define NUM_STATES  7
 #define InitTime  0
 #define AP4InitTime       1
-#define BlindTime 2
-#define Idle    3
-#define NextAcquisition 4
-#define AP 5
-#define DataTx 6
-#define Diagnostic 7
+#define Idle    2
+#define NextAcquisition 3
+#define AP 4
+#define DataTx 5
+#define Diagnostic 6
 
 char clientState;
 //EEPROM
 int currPos = 0;
 
+// Diagnostic
+int curr_diag_synthom;
+#define E_OK                0
+#define TO_WIFI_CONN        1
+#define TXDATA_CLIENT_FAILED  2
+
 // Wifi
+#define RETRY_DELAY_WIFI_CONN  500
+#define TO_WIFI_CONN_VAL        2000
+
 const char* ssid     = "AndroidAP_MARCO";
 const char* password = "";
 
-const char* host = "www.google.com";
+const char* host = "192.168.4.1";
 
-unsigned long long Delay2NextState[NUM_STATES] = {10,1000,1000,1000,1000,1000,1000,1000}; // expressed in millisec
+unsigned long long Delay2NextState[NUM_STATES] = {10,1000,1000,1000,1000,1000,1000}; // expressed in millisec
 float tempSamplesArray[NUM_SAMPLES]={0};
 float HumidSamplesArray[NUM_SAMPLES];
 int currIndexSamples = 0;
@@ -75,8 +85,13 @@ union __data2write
 
 union __data2write data2write;
 
-// 
-ESP8266WebServer server(80);
+
+
+
+void debugPrint(String str) {
+  if(isDebug)
+    serialDebug->print(str);
+}
 
 /* Just a little test message.  Go to http://192.168.4.1 in a web browser
  * connected to this access point to see it.
@@ -108,43 +123,89 @@ void reinit()
   data2write.blk2write.currHumidity=0;
 }
 
-int wifi_client()
+int SetWiFiAP(int currState)
 {
-  // Wifi scan
-  return 0;
-}
+ // https://learn.sparkfun.com/tutorials/esp8266-thing-hookup-guide/example-sketch-ap-web-server
+//  
+  WiFiClient client;
+ WiFi.mode(WIFI_AP);
+    int TOcounter = 0;
+    boolean TO_flag = 0;
+    const int httpPort_AP = 2357;
+    String response2client;
+   ESP8266WebServer server(httpPort_AP); 
+   
+  String AP_Name = "ESP8266_Client_" + ESP8266_CLIENT_ID;
+  String WiFiAPPSK = "";
+  // NECESSARIO CONVERTIRE DA STRING TO CHAR??????
+  // char AP_NameChar[AP_NameString.length() + 1];
+  // memset(AP_NameChar, 0, AP_NameString.length() + 1);
 
-int SetWiFiAP()
-{
-// WiFi.mode(WIFI_AP);
-//
-//  // Do a little work to get a unique-ish name. Append the
-//  // last two bytes of the MAC (HEX'd) to "Thing-":
-//  // uint8_t mac[WL_MAC_ADDR_LENGTH];
-//  // WiFi.softAPmacAddress(mac);
-//  // String macID = String(mac[WL_MAC_ADDR_LENGTH - 2], HEX) +
-//                 // String(mac[WL_MAC_ADDR_LENGTH - 1], HEX);
-//  // macID.toUpperCase();
-//  String AP_Name = "ESP8266 Thing ";
-//  String WiFiAPPSK = "";
-//
-//  // char AP_NameChar[AP_NameString.length() + 1];
-//  // memset(AP_NameChar, 0, AP_NameString.length() + 1);
-//
-//  // for (int i=0; i<AP_NameString.length(); i++)
-//    // AP_NameChar[i] = AP_NameString.charAt(i);
-//
-//  WiFi.softAP(AP_Name, WiFiAPPSK);
-// IPAddress myIP = WiFi.softAPIP();
-//  Serial.print("AP IP address: ");
-//  Serial.println(myIP);
-//  server.on("/", handleRoot);
-//  server.begin();
-//  Serial.println("HTTP server started");
-//
-//server.handleClient();  
-return 0;
-  
+  // for (int i=0; i<AP_NameString.length(); i++)
+    // AP_NameChar[i] = AP_NameString.charAt(i);
+
+  WiFi.softAP(AP_Name, WiFiAPPSK);
+ IPAddress myIP = WiFi.softAPIP();
+  Serial.print("AP IP address: ");
+  Serial.println(myIP);
+  server.on("/", handleRoot); //????
+  server.begin();
+  Serial.println("HTTP server started");
+
+  // Check if a client has connected
+  while((client = server.available()) == 0 && !TO_flag)
+  {
+      delay(RETRY_DELAY_CLIENT_TO_AP);
+      Serial.print(".");
+      TOcounter += RETRY_DELAY_CLIENT_TO_AP;
+      if(TOcounter > TO_CLIENT_TO_AP_VAL)
+      {
+          TO_flag = 1;
+      }
+  }
+  if(TO_flag)
+    return TO_CLIENT_TO_AP;
+    
+  // Read the first line of the request
+  String req = client.readStringUntil('\r');
+  Serial.println(req);
+  client.flush();
+
+   if (req.indexOf("Master_AP") != -1)
+   {
+      if(currState == AP4InitTime)
+      {
+          // retrieve the current date and the current time -> init the timing
+          //curr_time=year_month_days_hours_mins_seconds
+          if(req.indexOf("curr_time") != -1)
+          {
+              data2write.blk2write.currSeconds = 0; // parsing the string for seconds   
+              data2write.blk2write.currMinutes = 0;
+              data2write.blk2write.currHours = 0;
+              data2write.blk2write.currDays = 0;
+              response2client = "NO_DATA_TO_TX";
+          }  
+       }
+       if(currState == AP)
+       {
+           response2client = "DATA_TO_TX";
+       }  
+   }
+  // Prepare the response. Start with the common header:
+  String s = "HTTP/1.1 200 OK\r\n";
+  s += "Content-Type: text/html\r\n\r\n";
+  s += "<!DOCTYPE HTML>\r\n<html>\r\n";
+  s += response2client;
+  s += "</html>\n";
+
+  // Send the response to the client
+  client.print(s);
+  delay(1);
+  Serial.println("Client disonnected");
+
+  // The client will actually be disconnected 
+  // when the function returns and 'client' object is detroyed 
+  return E_OK;
 }
 
 int samplesAcquisition()
@@ -254,7 +315,83 @@ int handlingTime(int currState)
   delay(delay_ms);
   UpdatingSWtimer();
 }
+
+
+// http://www.rudiswiki.de/wiki9/WiFiFTPServer
+int client4TxData()
+{
+    // variables
+    int TOcounter = 0;
+    boolean TO_flag = 0;
+    const int httpPort_TxData = 2356;
+    // searcf for the Master_AP 
+    WiFi.begin(ssid, password);
+    // create the connection
+    while (WiFi.status() != WL_CONNECTED && !TO_flag) {
+      delay(RETRY_DELAY_WIFI_CONN);
+      Serial.print(".");
+      TOcounter += RETRY_DELAY_WIFI_CONN;
+      if(TOcounter > TO_WIFI_CONN_VAL)
+      {
+          TO_flag = 1;
+      }
+    }
+    // handle timeout of Wifi connection
+    if(TO_flag)
+    {
+      return TO_WIFI_CONN;  
+    }
+    // debug
+    Serial.println("");
+    Serial.println("WiFi connected");  
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());    
+     
+    //
+  // Use WiFiClient class to create TCP connections
+  WiFiClient client;
   
+  if (!client.connect(host, httpPort_TxData)) {
+    Serial.println("connection failed");
+    return TXDATA_CLIENT_FAILED;
+  }
+  
+  // We now create a URI for the request
+  String url = "/update.json";
+  
+  String content = String("api_key=") + api_key + "&" + "field1=" + ADC_value;
+  int content_length = content.length();
+           
+  Serial.print("Requesting URL: ");
+  Serial.println(url);
+    
+  client.print(String("POST ") + url + " HTTP/1.1" + "\r\n" +
+  "Host: " + String(host) + "\r\n"
+  "Content-Length: " + content_length + "\r\n\r\n" + 
+  content + "\r\n\r\n"
+  );
+  
+  unsigned long timeout = millis();
+  while (client.available() == 0) {
+    if (millis() - timeout > 5000) {
+      Serial.println(">>> Client Timeout !");
+      client.stop();
+      return TXDATA_CLIENT_TO;
+    }
+  }
+  
+  // Read all the lines of the reply from server and print them to Serial
+  while(client.available()){
+    String line = client.readStringUntil('\r');
+    Serial.print(line);
+  }
+  
+  Serial.println();
+  Serial.println("closing connection");
+    
+}
+
+
 void setup() 
 {
   pinMode(ESP8266_LED, OUTPUT);
@@ -266,25 +403,7 @@ void setup()
   
   delay(10);
   
-   // We start by connecting to a WiFi network
-
-  Serial.println();
-  Serial.println();
-  Serial.print("Connecting to ");
-  Serial.println(ssid);
-  
-  WiFi.begin(ssid, password);
-  
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-
-  Serial.println("");
-  Serial.println("WiFi connected");  
-  Serial.println("IP address: ");
-  Serial.println(WiFi.localIP()); 
-
+ 
   EEPROM.begin(512);
   // state machine
   clientState = 0;
@@ -301,41 +420,17 @@ void loop()
     break;
     case AP4InitTime:
     // Open the communication
-    SetWiFiAP();
-//    server.begin();
-//    // waiting for a request from the clientMaster
-//      // Check if a client has connected
-//    WiFiClient client = server.available();
-//    if (!client) {
-//      return;
-//    }
-//    
-//    // Read the first line of the request
-//    String req = client.readStringUntil('\r');
-//    Serial.println(req);
-//    client.flush();
-//
-//    // Send the response to the client
-//    client.print(s);
-//    delay(1);
-//    Serial.println("Client disonnected");
-    
-    // client -> time -> requestNextComm= NO
-    // if connection is OK
-    reinitializeTime();
-    
-    clientState = BlindTime;
-    
-    // else
-    clientState = Diagnostic;
-    break;
-    case BlindTime:
-    // 
-    samplesAcquisition();
-    // calc average -> add in array
-    calcAverageAndAppend();
-    // next state
-    clientState = Idle;
+    int ret_val = SetWiFiAP();
+    if(ret_val == E_OK)
+    {
+      clientState = NextAcquisition;
+    }
+    else
+    {
+      // mem the synthom
+      curr_diag_synthom = ret_val;
+      clientState = Diagnostic;
+    }
     break;
     case Idle:
        timeNow = millis()/1000; // the number of milliseconds that have passed since boot
