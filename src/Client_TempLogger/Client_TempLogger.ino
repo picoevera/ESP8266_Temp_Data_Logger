@@ -18,6 +18,7 @@
 //
 
 #define NUM_SAMPLES 8
+#define DELAY2NEXT_SAMPLE 10
 
 #define ESP8266_LED  ESP8266_12_GPIO5 
 #define DHTPIN ESP8266_12_GPIO12
@@ -27,18 +28,19 @@
 DHT dht(DHTPIN, DHTTYPE, 15);
 
 // SM states
-#define NUM_STATES  7
+#define NUM_STATES  6
 #define InitTime  0
-#define AP4InitTime       1
+#define SetInitTime       1
 #define Idle    2
 #define NextAcquisition 3
-#define AP 4
-#define DataTx 5
-#define Diagnostic 6
+#define DataTx 4
+#define Diagnostic 5
 
 char clientState;
+char isDebug = 1;
 //EEPROM
 int currPos = 0;
+int nItemsEEPROM = 0;
 
 // Diagnostic
 int curr_diag_synthom;
@@ -55,7 +57,7 @@ const char* password = "";
 
 const char* host = "192.168.4.1";
 
-unsigned long long Delay2NextState[NUM_STATES] = {10,1000,1000,1000,1000,1000,1000}; // expressed in millisec
+unsigned long long Delay2NextState[NUM_STATES] = {10,1000,1000,1000,1000,1000}; // expressed in millisec
 float tempSamplesArray[NUM_SAMPLES]={0};
 float HumidSamplesArray[NUM_SAMPLES];
 int currIndexSamples = 0;
@@ -67,6 +69,7 @@ unsigned long timeLast = 0;
 unsigned long lastAcquisition = 0;
 unsigned long lastTx = 0;
 
+#define SIZE_STRUCT 10
 struct _time_data
 {
   char currSeconds;
@@ -74,33 +77,31 @@ struct _time_data
   char currHours ;
   char currDays;
   char currTemp;
+  char currTempDec;
   char currHumidity;
+  char currHumidityDec;
 };
 
 union __data2write
 {
     struct _time_data blk2write;
-    char array2write[8];
+    char array2write[SIZE_STRUCT];
 };
 
 union __data2write data2write;
 
+int Delay2NextSample = DELAY2NEXT_SAMPLE;
 
 
 
-void debugPrint(String str) {
-  if(isDebug)
-    serialDebug->print(str);
-}
+//void debugPrint(String str) {
+//  if(isDebug)
+//    Serial.print(str);
+//}
 
 /* Just a little test message.  Go to http://192.168.4.1 in a web browser
  * connected to this access point to see it.
  */
-void handleRoot() {
-  server.send(200, "text/html", "<h1>You are connected</h1>");
-}
-
-
 
 void reinit()
 {
@@ -112,6 +113,9 @@ void reinit()
     HumidSamplesArray[i] = 0;
   }
   currIndexSamples = 0;
+
+  currPos = 0;
+  nItemsEEPROM = 0;
   
   timeNow = 0;
   timeLast = 0;
@@ -120,105 +124,28 @@ void reinit()
   data2write.blk2write.currHours = 0;
   data2write.blk2write.currDays = 0;
   data2write.blk2write.currTemp=0;
+  data2write.blk2write.currTempDec=0;
   data2write.blk2write.currHumidity=0;
+  data2write.blk2write.currHumidityDec=0;
 }
 
-int SetWiFiAP(int currState)
-{
- // https://learn.sparkfun.com/tutorials/esp8266-thing-hookup-guide/example-sketch-ap-web-server
-//  
-  WiFiClient client;
- WiFi.mode(WIFI_AP);
-    int TOcounter = 0;
-    boolean TO_flag = 0;
-    const int httpPort_AP = 2357;
-    String response2client;
-   ESP8266WebServer server(httpPort_AP); 
-   
-  String AP_Name = "ESP8266_Client_" + ESP8266_CLIENT_ID;
-  String WiFiAPPSK = "";
-  // NECESSARIO CONVERTIRE DA STRING TO CHAR??????
-  // char AP_NameChar[AP_NameString.length() + 1];
-  // memset(AP_NameChar, 0, AP_NameString.length() + 1);
-
-  // for (int i=0; i<AP_NameString.length(); i++)
-    // AP_NameChar[i] = AP_NameString.charAt(i);
-
-  WiFi.softAP(AP_Name, WiFiAPPSK);
- IPAddress myIP = WiFi.softAPIP();
-  Serial.print("AP IP address: ");
-  Serial.println(myIP);
-  server.on("/", handleRoot); //????
-  server.begin();
-  Serial.println("HTTP server started");
-
-  // Check if a client has connected
-  while((client = server.available()) == 0 && !TO_flag)
-  {
-      delay(RETRY_DELAY_CLIENT_TO_AP);
-      Serial.print(".");
-      TOcounter += RETRY_DELAY_CLIENT_TO_AP;
-      if(TOcounter > TO_CLIENT_TO_AP_VAL)
-      {
-          TO_flag = 1;
-      }
-  }
-  if(TO_flag)
-    return TO_CLIENT_TO_AP;
-    
-  // Read the first line of the request
-  String req = client.readStringUntil('\r');
-  Serial.println(req);
-  client.flush();
-
-   if (req.indexOf("Master_AP") != -1)
-   {
-      if(currState == AP4InitTime)
-      {
-          // retrieve the current date and the current time -> init the timing
-          //curr_time=year_month_days_hours_mins_seconds
-          if(req.indexOf("curr_time") != -1)
-          {
-              data2write.blk2write.currSeconds = 0; // parsing the string for seconds   
-              data2write.blk2write.currMinutes = 0;
-              data2write.blk2write.currHours = 0;
-              data2write.blk2write.currDays = 0;
-              response2client = "NO_DATA_TO_TX";
-          }  
-       }
-       if(currState == AP)
-       {
-           response2client = "DATA_TO_TX";
-       }  
-   }
-  // Prepare the response. Start with the common header:
-  String s = "HTTP/1.1 200 OK\r\n";
-  s += "Content-Type: text/html\r\n\r\n";
-  s += "<!DOCTYPE HTML>\r\n<html>\r\n";
-  s += response2client;
-  s += "</html>\n";
-
-  // Send the response to the client
-  client.print(s);
-  delay(1);
-  Serial.println("Client disonnected");
-
-  // The client will actually be disconnected 
-  // when the function returns and 'client' object is detroyed 
-  return E_OK;
-}
 
 int samplesAcquisition()
 {
   // 8 samples every half min
+  boolean Led_Val = 1;
+  digitalWrite(ESP8266_LED, Led_Val);
   for(int i=0;i<NUM_SAMPLES;i++)
   {  
     // read the sample
     tempSamplesArray[i] = dht.readTemperature();
     HumidSamplesArray[i] = dht.readHumidity();
     // delay
-    handlingTime(BlindTime);
-    // 
+    handlingTime(Delay2NextSample,Delay2NextState[Delay2NextSample]);
+    //LED
+    Led_Val = ~Led_Val;
+    digitalWrite(ESP8266_LED, Led_Val);
+     
   } 
 }
 
@@ -240,8 +167,9 @@ int calcAverageAndAppend()
   for(index = 0; index < sizeof(data2write.blk2write);index++)
   {
        EEPROM.write(currPos, data2write.array2write[index]);
-       currPos += index;
+       currPos ++;
   }
+  nItemsEEPROM ++;
   EEPROM.commit();
 }
 
@@ -309,88 +237,11 @@ int reinitializeTime()
   data2write.blk2write.currDays = 0;
 }
 
-int handlingTime(int currState)
+int handlingTime(int currState, unsigned long delay_ms)
 {
-  unsigned long delay_ms = Delay2NextState[currState];
   delay(delay_ms);
   UpdatingSWtimer();
 }
-
-
-// http://www.rudiswiki.de/wiki9/WiFiFTPServer
-int client4TxData()
-{
-    // variables
-    int TOcounter = 0;
-    boolean TO_flag = 0;
-    const int httpPort_TxData = 2356;
-    // searcf for the Master_AP 
-    WiFi.begin(ssid, password);
-    // create the connection
-    while (WiFi.status() != WL_CONNECTED && !TO_flag) {
-      delay(RETRY_DELAY_WIFI_CONN);
-      Serial.print(".");
-      TOcounter += RETRY_DELAY_WIFI_CONN;
-      if(TOcounter > TO_WIFI_CONN_VAL)
-      {
-          TO_flag = 1;
-      }
-    }
-    // handle timeout of Wifi connection
-    if(TO_flag)
-    {
-      return TO_WIFI_CONN;  
-    }
-    // debug
-    Serial.println("");
-    Serial.println("WiFi connected");  
-    Serial.println("IP address: ");
-    Serial.println(WiFi.localIP());    
-     
-    //
-  // Use WiFiClient class to create TCP connections
-  WiFiClient client;
-  
-  if (!client.connect(host, httpPort_TxData)) {
-    Serial.println("connection failed");
-    return TXDATA_CLIENT_FAILED;
-  }
-  
-  // We now create a URI for the request
-  String url = "/update.json";
-  
-  String content = String("api_key=") + api_key + "&" + "field1=" + ADC_value;
-  int content_length = content.length();
-           
-  Serial.print("Requesting URL: ");
-  Serial.println(url);
-    
-  client.print(String("POST ") + url + " HTTP/1.1" + "\r\n" +
-  "Host: " + String(host) + "\r\n"
-  "Content-Length: " + content_length + "\r\n\r\n" + 
-  content + "\r\n\r\n"
-  );
-  
-  unsigned long timeout = millis();
-  while (client.available() == 0) {
-    if (millis() - timeout > 5000) {
-      Serial.println(">>> Client Timeout !");
-      client.stop();
-      return TXDATA_CLIENT_TO;
-    }
-  }
-  
-  // Read all the lines of the reply from server and print them to Serial
-  while(client.available()){
-    String line = client.readStringUntil('\r');
-    Serial.print(line);
-  }
-  
-  Serial.println();
-  Serial.println("closing connection");
-    
-}
-
 
 void setup() 
 {
@@ -409,20 +260,234 @@ void setup()
   clientState = 0;
 }
 
+int closeConnWifi()
+{
+  WiFi.disconnect();
+}
+
+void delay_driveLED(int curr_delay, int currState)
+{
+  //if(currState == 
+  handlingTime(0, curr_delay);
+}
+
+
+int openConn2WiFi(int currState)
+{
+  const char* ssid     = "AndroidAP_MARCO";
+  const char* password = "";
+  int TOcounter = 0;
+  boolean TO_flag = 0;
+  const int httpPort_AP = 2357;
+   String response2client;
+  
+  // Set WiFi to station mode and disconnect from an AP if it was previously connected
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  WiFi.begin(ssid, password);
+  handlingTime(0,100);
+
+    // create the connection
+    while (WiFi.status() != WL_CONNECTED && !TO_flag) {
+      
+      delay_driveLED(RETRY_DELAY_WIFI_CONN, currState);
+      Serial.print(".");
+      TOcounter += RETRY_DELAY_WIFI_CONN;
+      if(TOcounter > TO_WIFI_CONN_VAL)
+      {
+          TO_flag = 1;
+      }
+    }
+    // handle timeout of Wifi connection
+    if(TO_flag)
+    {
+      return TO_WIFI_CONN;  
+    }
+    // debug
+    Serial.println("");
+    Serial.println("WiFi connected");  
+    Serial.println("IP address: ");
+    Serial.println(WiFi.localIP());    
+    return E_OK; 
+}
+
+int connectClient2NIST(WiFiClient *p_client)
+{
+  const int httpPort = 13;
+
+  if (!p_client->connect(host, httpPort)) {
+    Serial.println("connection failed");
+    return TXDATA_CLIENT_FAILED;
+  }
+      
+}
+
+int getTime(int currState)
+{
+  // https://www.hackster.io/rayburne/nist-date-amp-time-with-esp8266-and-oled-display-e8b9a9
+  const char* host = "time.nist.gov"; // Round-robin DAYTIME protocol
+  int ret_val;
+
+  ret_val= openConn2WiFi(currState);
+  if(ret_val == E_OK)
+  {
+     // Use WiFiClient class to create TCP connections
+     WiFiClient client2NIST;
+      const int httpPort = 13;
+
+      if (!client2NIST.connect(host, httpPort)) {
+        Serial.println("connection failed");
+        closeConnWifi();
+        return TXDATA_CLIENT_FAILED;
+      } 
+      // This will send the request to the server
+      client2NIST.print("HEAD / HTTP/1.1\r\nAccept: */*\r\nUser-Agent: Mozilla/4.0 (compatible; ESP8266 NodeMcu Lua;)\r\n\r\n");
+
+      handlingTime(0,100);
+    
+      // Read all the lines of the reply from server and print them to Serial
+      // expected line is like : Date: Thu, 01 Jan 2015 22:00:14 GMT
+      char buffer[12];
+      String TimeDate = "";
+      Serial.print(">  Listening...<");
+    
+      while(client2NIST.available())
+      {
+        String line = client2NIST.readStringUntil('\r');
+    
+        if (line.indexOf("Date") != -1)
+        {
+          Serial.print("=====>");
+        } else
+        {
+          Serial.print(line);
+          // date starts at pos 7
+          TimeDate = line.substring(7);
+          Serial.println(TimeDate);
+          // time starts at pos 14
+          TimeDate = line.substring(7, 15);
+          TimeDate.toCharArray(buffer, 10);
+          Serial.println("UTC Date/Time:");
+          TimeDate = line.substring(16, 24);
+          TimeDate.toCharArray(buffer, 10);
+
+          
+        }
+      }
+  Serial.println();
+  Serial.println("closing connection");
+  // !! copy date in structure
+
+     closeConnWifi();
+     return E_OK;
+      
+  }
+  closeConnWifi();
+  return(ret_val);
+   
+}
+
+void setEmptyEEPROM()
+{
+    // Empty the EEPROM  
+}
+
+
+int TxData2IOT(int currState)
+{
+    // Blinking LED -> trying the connection
+  int ret_val;
+    
+    // Open WiFi
+  ret_val= openConn2WiFi(currState);
+  if(ret_val == E_OK)
+  {    
+    // Open Client
+     // Use WiFiClient class to create TCP connections
+     WiFiClient client2IOT;
+      const int httpPort = 80;
+      const char* host = "api.pushingbox.com"; 
+
+      if (!client2IOT.connect(host, httpPort)) {
+        Serial.println("connection failed");
+        closeConnWifi();
+        return TXDATA_CLIENT_FAILED;
+      } 
+      String getmsg;
+      String currTemp;
+      String currHum;
+      union __data2write sample2write;
+      // Read data from EEPROM
+      int i_item, i_byte;
+      for(i_item = 0;i_item<nItemsEEPROM;i_item++)
+      {
+        for(i_byte=0; i_byte<SIZE_STRUCT; i_byte++)
+        {
+          sample2write.array2write[i_byte] = (char)EEPROM.read(i_byte + (i_item*SIZE_STRUCT));
+        }
+        
+      // This will send the request to the server
+
+      //http://api.pushingbox.com/pushingbox?devid=v6F177361DA38A29&humidityData=33&celData=44&fehrData=111&hicData=22&hifData=77
+
+      currTemp = String(sample2write.blk2write.currTemp) + "," + String(sample2write.blk2write.currTempDec);
+      currHum = String(sample2write.blk2write.currHumidity) + "," + String(sample2write.blk2write.currHumidityDec);
+      getmsg = "";
+      getmsg =  "GET /pushingbox?devid=v6F177361DA38A29&humidityData=";
+      getmsg += String(sample2write.blk2write.currSeconds);
+      getmsg += "&celData=" + String(sample2write.blk2write.currMinutes);
+      getmsg += "&fehrData=" + String(sample2write.blk2write.currHours);
+      getmsg += "&hicData=" + currTemp;
+      getmsg += "&hifData=" + currHum + " HTTP/1.1";
+      //sprintf(postmsg,"GET /pushingbox?devid=v6F177361DA38A29&humidityData=%d&celData=%d&fehrData=%d&hicData=%f&hifData=%f HTTP/1.1",data2write.blk2write.currSeconds, data2write.blk2write.currMinutes, data2write.blk2write.currHours, String.toFloat(currTemp),String.toFloat(currHum)); // NOTE** In this line of code you can see where the temperature value is inserted into the wed address. It follows 'status=' Change that value to whatever you want to post.
+      client2IOT.println(getmsg.c_str());
+      client2IOT.println("Host: api.pushingbox.com");
+      client2IOT.println("Connection: close");
+      client2IOT.println();
+      Serial.println(getmsg.c_str());
+      Serial.println("Host: api.pushingbox.com");      
+      handlingTime(0,100);
+
+      
+      
+      }
+    
+
+
+    // TX Data 
+    
+    // Empty EEPROM
+    setEmptyEEPROM();
+
+    closeConnWifi();
+
+    return E_OK;
+  }
+  closeConnWifi();
+  return(ret_val);    
+}
+
+
 void loop() 
 {
+  static int ret_val;
   switch(clientState)
   {
     case InitTime:
     // reinitialization structures and counters  
     reinit();
-    clientState = AP4InitTime;
+    clientState = SetInitTime;
     break;
-    case AP4InitTime:
-    // Open the communication
-    int ret_val = SetWiFiAP();
+    case SetInitTime:
+    // switch on the led
+    digitalWrite(ESP8266_LED, HIGH);
+    // try connecting to Time 
+    ret_val = getTime(clientState);
     if(ret_val == E_OK)
     {
+      // switch off the LED
+      digitalWrite(ESP8266_LED, LOW);
+      // 
       clientState = NextAcquisition;
     }
     else
@@ -434,15 +499,15 @@ void loop()
     break;
     case Idle:
        timeNow = millis()/1000; // the number of milliseconds that have passed since boot
-       if(timeNow - lastTx >= Delay2NextState[AP])
+       if(timeNow - lastTx >= Delay2NextState[DataTx])
        {
            // if Time to Communicate
-           clientState = AP;
+           clientState = DataTx;
        }
        else
        {    
           // else
-          handlingTime(Idle);
+          handlingTime(Idle,Delay2NextState[Idle]);
           clientState = NextAcquisition;
           // 
        }
@@ -455,26 +520,23 @@ void loop()
     // next 
     clientState = Idle;
     break;
-    case AP:
-    // Open the communication
-    SetWiFiAP();
-    server.begin();
-    // waiting for client request -> repetition
-    
-    // If Time Out
-    clientState = Diagnostic;
-    // else
-    clientState = DataTx;
-    break;
     case DataTx:
     // search for AP_Master
-    // If channel is OK
-    // TX data
-    clientState = Idle;
-    // else
-    clientState = Diagnostic;
+    ret_val = TxData2IOT(clientState);
+    if(ret_val == E_OK)
+    {
+      clientState = Idle;
+    } 
+    else 
+    {
+      // mem the synthom
+      curr_diag_synthom = ret_val;
+      clientState = Diagnostic;
+    }
     break;
     case Diagnostic:
+    // Copy CODE in EEPROM 
+    Serial.println("Diag");
     // if MAN = reinit 
     clientState = InitTime;
     // If MAN = TimeOut_Client
@@ -482,6 +544,7 @@ void loop()
     // If MAN = 
     
     break;
+    default:
+    break;
   }
- 
 }
