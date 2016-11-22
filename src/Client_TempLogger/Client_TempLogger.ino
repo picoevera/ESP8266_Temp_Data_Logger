@@ -39,8 +39,9 @@ DHT dht(DHTPIN, DHTTYPE, 15);
 char clientState;
 char isDebug = 1;
 //EEPROM
-int currPos = 0;
-int nItemsEEPROM = 0;
+#define EE_SIZE 512
+int firstFreeByte = 0;    // Position of the first empty byte
+int nEntriesInEEPROM = 0; // number of entries(data2write) in EEPROM 
 
 // Diagnostic
 int curr_diag_synthom;
@@ -57,7 +58,7 @@ const char* password = "";
 
 const char* host = "192.168.4.1";
 
-unsigned long long Delay2NextState[NUM_STATES] = {10,1000,1000,1000,1000,1000}; // expressed in millisec
+unsigned long long Delay2NextState[NUM_STATES] = {10,10,120000,1000,30000,100}; // expressed in millisec
 float tempSamplesArray[NUM_SAMPLES]={0};
 float HumidSamplesArray[NUM_SAMPLES];
 int currIndexSamples = 0;
@@ -76,6 +77,8 @@ struct _time_data
   char currMinutes;
   char currHours ;
   char currDays;
+  char currMonth;
+  char currYear;
   char currTemp;
   char currTempDec;
   char currHumidity;
@@ -99,9 +102,59 @@ int Delay2NextSample = DELAY2NEXT_SAMPLE;
 //    Serial.print(str);
 //}
 
-/* Just a little test message.  Go to http://192.168.4.1 in a web browser
- * connected to this access point to see it.
- */
+// EEPROM Methods
+void EE_Setup() { EEPROM.begin(EE_SIZE); }
+
+void EE_EraseData() {
+  int i;
+
+  for (i = 0; i < EE_SIZE; i++) {
+    yield();
+    EEPROM.write(i, 0);
+  }
+  EEPROM.commit();
+}
+
+void EE_StoreData(char *data, short int len) {
+  short int i;
+
+  for (i = 0; i < len; i++) {
+    yield();
+    EEPROM.write(i, data[i]);
+  }
+  EEPROM.commit();
+}
+
+void EE_LoadData(short int startByte, short int nByte2Read, char* data) {
+  short int i;
+
+  for (i = startByte; i < nByte2Read; i++) {
+    yield();
+    data[i] = EEPROM.read(i);
+  }
+}
+
+void updateEEcounters(short int nWrittenBytes)
+{
+    firstFreeByte += nWrittenBytes;
+    nEntriesInEEPROM++;
+}
+
+void resetEEcounters()
+{
+    firstFreeByte = 0;
+    nEntriesInEEPROM = 0;
+}
+
+void reinitializeTime()
+{
+  data2write.blk2write.currSeconds = 0;
+  data2write.blk2write.currMinutes = 0;
+  data2write.blk2write.currHours = 0;
+  data2write.blk2write.currDays = 0;
+  data2write.blk2write.currMonth = 0;
+  data2write.blk2write.currYear = 0;
+}
 
 void reinit()
 {
@@ -114,16 +167,11 @@ void reinit()
   }
   currIndexSamples = 0;
 
-  currPos = 0;
-  nItemsEEPROM = 0;
+  resetEEcounters();
   
   timeNow = 0;
   timeLast = 0;
-  data2write.blk2write.currSeconds = 0;
-  data2write.blk2write.currMinutes = 0;
-  data2write.blk2write.currHours = 0;
-  data2write.blk2write.currDays = 0;
-  data2write.blk2write.currTemp=0;
+  reinitializeTime();
   data2write.blk2write.currTempDec=0;
   data2write.blk2write.currHumidity=0;
   data2write.blk2write.currHumidityDec=0;
@@ -164,13 +212,9 @@ int calcAverageAndAppend()
   // humidity
   data2write.blk2write.currHumidity = humVal/NUM_SAMPLES;
 
-  for(index = 0; index < sizeof(data2write.blk2write);index++)
-  {
-       EEPROM.write(currPos, data2write.array2write[index]);
-       currPos ++;
-  }
-  nItemsEEPROM ++;
-  EEPROM.commit();
+  EE_StoreData(data2write.array2write, SIZE_STRUCT);
+  // Update the counters
+  updateEEcounters(SIZE_STRUCT);
 }
 
 void UpdatingSWtimer()
@@ -229,13 +273,6 @@ void UpdatingSWtimer()
   Serial.println(data2write.blk2write.currSeconds); 
 }
 
-int reinitializeTime()
-{
-  data2write.blk2write.currSeconds = 0;
-  data2write.blk2write.currMinutes = 0;
-  data2write.blk2write.currHours = 0;
-  data2write.blk2write.currDays = 0;
-}
 
 int handlingTime(int currState, unsigned long delay_ms)
 {
@@ -254,8 +291,8 @@ void setup()
   
   delay(10);
   
- 
-  EEPROM.begin(512);
+  EE_Setup();
+  
   // state machine
   clientState = 0;
 }
@@ -322,6 +359,19 @@ int connectClient2NIST(WiFiClient *p_client)
       
 }
 
+int convMonth2Index(String month)
+{
+    String monthsList[12] = {"Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul","Aug","Sep","Oct","Nov","Dec"};
+    int i=0;
+    while( (month !=  monthsList[i]) && i< 12)
+    {
+        i++;  
+    }
+    if(i==12){
+      i=0; // Forcing Jan
+    }  
+    return (i+1);    
+}
 int getTime(int currState)
 {
   // https://www.hackster.io/rayburne/nist-date-amp-time-with-esp8266-and-oled-display-e8b9a9
@@ -370,8 +420,34 @@ int getTime(int currState)
           Serial.println("UTC Date/Time:");
           TimeDate = line.substring(16, 24);
           TimeDate.toCharArray(buffer, 10);
+          // Date: Thu, 01 Jan 2015 22:00:14 GMT
 
-          
+          Serial.println("UTC Date/Time - Splitting:");
+          Serial.println("currDays");
+          Serial.println(line.substring(12, 13));
+          Serial.println((line.substring(12, 13)).toInt());
+          Serial.println("currMonth");
+          Serial.println(line.substring(15, 17));
+          Serial.println(convMonth2Index(line.substring(15, 17)));
+          Serial.println("currYear");
+          Serial.println(line.substring(21, 22));
+          Serial.println((line.substring(21, 22)).toInt());
+          Serial.println("currHours");
+          Serial.println(line.substring(24, 25));
+          Serial.println((line.substring(24, 25)).toInt());
+          Serial.println("currMinutes");
+          Serial.println(line.substring(27, 28));
+          Serial.println((line.substring(27, 28)).toInt());
+          Serial.println("currSeconds");
+          Serial.println(line.substring(30, 31));
+          Serial.println((line.substring(30, 31)).toInt());
+         
+          data2write.blk2write.currDays = (line.substring(12, 13)).toInt();            
+          data2write.blk2write.currMonth = convMonth2Index(line.substring(15, 17));        
+          data2write.blk2write.currYear = (line.substring(21, 22)).toInt();
+          data2write.blk2write.currHours = (line.substring(24, 25)).toInt();
+          data2write.blk2write.currMinutes = (line.substring(27, 28)).toInt();
+          data2write.blk2write.currSeconds = (line.substring(30, 31)).toInt();        
         }
       }
   Serial.println();
@@ -387,10 +463,7 @@ int getTime(int currState)
    
 }
 
-void setEmptyEEPROM()
-{
-    // Empty the EEPROM  
-}
+
 
 
 int TxData2IOT(int currState)
@@ -419,46 +492,38 @@ int TxData2IOT(int currState)
       union __data2write sample2write;
       // Read data from EEPROM
       int i_item, i_byte;
-      for(i_item = 0;i_item<nItemsEEPROM;i_item++)
+      for(i_item = 0;i_item<nEntriesInEEPROM;i_item++)
       {
-        for(i_byte=0; i_byte<SIZE_STRUCT; i_byte++)
-        {
-          sample2write.array2write[i_byte] = (char)EEPROM.read(i_byte + (i_item*SIZE_STRUCT));
-        }
+        EE_LoadData((i_item*SIZE_STRUCT), SIZE_STRUCT, sample2write.array2write);
         
-      // This will send the request to the server
-
-      //http://api.pushingbox.com/pushingbox?devid=v6F177361DA38A29&humidityData=33&celData=44&fehrData=111&hicData=22&hifData=77
-
-      currTemp = String(sample2write.blk2write.currTemp) + "," + String(sample2write.blk2write.currTempDec);
-      currHum = String(sample2write.blk2write.currHumidity) + "," + String(sample2write.blk2write.currHumidityDec);
-      getmsg = "";
-      getmsg =  "GET /pushingbox?devid=v6F177361DA38A29&humidityData=";
-      getmsg += String(sample2write.blk2write.currSeconds);
-      getmsg += "&celData=" + String(sample2write.blk2write.currMinutes);
-      getmsg += "&fehrData=" + String(sample2write.blk2write.currHours);
-      getmsg += "&hicData=" + currTemp;
-      getmsg += "&hifData=" + currHum + " HTTP/1.1";
-      //sprintf(postmsg,"GET /pushingbox?devid=v6F177361DA38A29&humidityData=%d&celData=%d&fehrData=%d&hicData=%f&hifData=%f HTTP/1.1",data2write.blk2write.currSeconds, data2write.blk2write.currMinutes, data2write.blk2write.currHours, String.toFloat(currTemp),String.toFloat(currHum)); // NOTE** In this line of code you can see where the temperature value is inserted into the wed address. It follows 'status=' Change that value to whatever you want to post.
-      client2IOT.println(getmsg.c_str());
-      client2IOT.println("Host: api.pushingbox.com");
-      client2IOT.println("Connection: close");
-      client2IOT.println();
-      Serial.println(getmsg.c_str());
-      Serial.println("Host: api.pushingbox.com");      
-      handlingTime(0,100);
-
-      
+        // This will send the request to the server
+  
+        //http://api.pushingbox.com/pushingbox?devid=v6F177361DA38A29&humidityData=33&celData=44&fehrData=111&hicData=22&hifData=77
+  
+        currTemp = String(sample2write.blk2write.currTemp) + "," + String(sample2write.blk2write.currTempDec);
+        currHum = String(sample2write.blk2write.currHumidity) + "," + String(sample2write.blk2write.currHumidityDec);
+        getmsg = "";
+        getmsg =  "GET /pushingbox?devid=v6F177361DA38A29&humidityData=";
+        getmsg += String(sample2write.blk2write.currDays)+"/"+ data2write.blk2write.currMonth+ "/" + data2write.blk2write.currYear;
+        getmsg += "&celData=" + String(000000000000000000);
+        getmsg += "&fehrData=" + String(sample2write.blk2write.currHours)+":"+ String(sample2write.blk2write.currMinutes) +":"+String(sample2write.blk2write.currSeconds);
+        getmsg += "&hicData=" + currTemp;
+        getmsg += "&hifData=" + currHum + " HTTP/1.1";
+        //sprintf(postmsg,"GET /pushingbox?devid=v6F177361DA38A29&humidityData=%d&celData=%d&fehrData=%d&hicData=%f&hifData=%f HTTP/1.1",data2write.blk2write.currSeconds, data2write.blk2write.currMinutes, data2write.blk2write.currHours, String.toFloat(currTemp),String.toFloat(currHum)); // NOTE** In this line of code you can see where the temperature value is inserted into the wed address. It follows 'status=' Change that value to whatever you want to post.
+        // TX Data      
+        client2IOT.println(getmsg.c_str());
+        client2IOT.println("Host: api.pushingbox.com");
+        client2IOT.println("Connection: close");
+        client2IOT.println();
+        Serial.println(getmsg.c_str());
+        Serial.println("Host: api.pushingbox.com");      
+        handlingTime(0,100);
       
       }
     
-
-
-    // TX Data 
-    
     // Empty EEPROM
-    setEmptyEEPROM();
-
+    EE_EraseData();
+    resetEEcounters();
     closeConnWifi();
 
     return E_OK;
